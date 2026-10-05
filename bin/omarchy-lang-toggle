@@ -9,6 +9,7 @@ macOS-style keyboard layout switcher for Omarchy / Hyprland.
 import fcntl
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -51,6 +52,20 @@ def get_configured_layouts():
     return ["us"]
 
 
+def get_configured_variants(count):
+    """Per-layout variants from Hyprland options, padded to `count` entries."""
+    try:
+        out = subprocess.check_output(
+            ["hyprctl", "getoption", "input:kb_variant", "-j"],
+            stderr=subprocess.DEVNULL,
+        )
+        raw = json.loads(out).get("str", "")
+    except Exception:
+        raw = ""
+    variants = [v.strip() for v in raw.split(",")]
+    return (variants + [""] * count)[:count]
+
+
 def get_hyprland_devices():
     """Get all connected devices from Hyprland."""
     try:
@@ -62,44 +77,43 @@ def get_hyprland_devices():
         return {}
 
 
+# Keep in sync with UNTYPED_KEYBOARDS in KeyboardLayoutModel.js and
+# untyped_keyboards_re in bin/macos-keyboard-layout.
+UNTYPED_KEYBOARDS = re.compile(
+    r"(consumer|system)-control|avrcp|fcitx|hl-virtual-keyboard|power-button|sleep-button|lid-switch|video-bus"
+)
+
+
 def is_typed_keyboard(name):
     """Filter out non-typing virtual devices, buttons, switches."""
-    n = name.lower()
-    return not (
-        "consumer" in n
-        or "system" in n
-        or "virtual" in n
-        or "fcitx" in n
-        or "power-button" in n
-        or "sleep-button" in n
-        or "lid-switch" in n
-        or "video-bus" in n
-        or "avrcp" in n
-    )
+    return not UNTYPED_KEYBOARDS.search(name.lower())
 
 
-def get_active_keyboard_info(devices, num_layouts):
-    """Find the main typed keyboard, its active layout index, and keymap name."""
+def get_active_layout_index(devices, num_layouts):
+    """Active layout index of the typing keyboards.
+
+    Keyboards can disagree (a hot-plugged one starts at index 0), so take the
+    furthest along, the same rule the layout helper and the bar widget use.
+    """
     keyboards = devices.get("keyboards", [])
-    typed_kbs = [kb for kb in keyboards if is_typed_keyboard(kb.get("name", ""))]
-    target_kb = typed_kbs[0] if typed_kbs else (keyboards[0] if keyboards else {})
-
-    idx = target_kb.get("active_layout_index", 0)
-    keymap = target_kb.get("active_keymap", "")
-
-    # Ensure index is within range
-    if not isinstance(idx, int) or idx < 0 or idx >= num_layouts:
-        idx = 0
-
-    return idx, keymap
+    typed = [kb for kb in keyboards if is_typed_keyboard(kb.get("name", ""))]
+    indices = [
+        kb.get("active_layout_index", 0)
+        for kb in (typed or keyboards)
+        if isinstance(kb.get("active_layout_index", 0), int)
+    ]
+    idx = max(indices, default=0)
+    return idx if 0 <= idx < num_layouts else 0
 
 
-def sync_fcitx(layout_code):
+def sync_fcitx(layout_code, variant=""):
     """fcitx5 keyboard-* input methods map keysyms themselves, so typing would
-    ignore XKB group switches. Keep its input method in step with the layout."""
+    ignore XKB group switches. Keep its input method in step with the layout
+    (fcitx5 names variants keyboard-<layout>-<variant>)."""
+    name = "keyboard-" + layout_code + ("-" + variant if variant else "")
     try:
         subprocess.run(
-            ["fcitx5-remote", "-s", "keyboard-" + layout_code],
+            ["fcitx5-remote", "-s", name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -107,7 +121,7 @@ def sync_fcitx(layout_code):
         pass
 
 
-def apply_layout_to_typed(devices, target_idx, configured_layouts):
+def apply_layout_to_typed(devices, target_idx, configured_layouts, variants=()):
     """Switch layout on typing keyboards only (skip buttons, consumer/system controls)."""
     keyboards = devices.get("keyboards", [])
     target_str = str(target_idx)
@@ -120,7 +134,8 @@ def apply_layout_to_typed(devices, target_idx, configured_layouts):
                 stderr=subprocess.DEVNULL,
             )
     if 0 <= target_idx < len(configured_layouts):
-        sync_fcitx(configured_layouts[target_idx])
+        variant = variants[target_idx] if target_idx < len(variants) else ""
+        sync_fcitx(configured_layouts[target_idx], variant)
 
 
 COMMON_NAMES = {
@@ -180,22 +195,6 @@ def show_switcher_hud(target_idx, configured_layouts, names):
         pass
 
 
-def show_osd(layout_name):
-    """Display Omarchy OSD notification with the active layout name."""
-    if not layout_name:
-        return
-    # Clean up verbose technical suffixes like ", with dead keys"
-    clean_name = layout_name.split(", with")[0].strip()
-    try:
-        subprocess.Popen(
-            ["omarchy", "osd", "-i", "input-keyboard", "-m", clean_name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-
-
 def load_state():
     for path in (STATE_FILE, LEGACY_STATE_FILE):
         if os.path.exists(path):
@@ -224,6 +223,7 @@ def main():
     settings = load_settings()
     configured_layouts = get_configured_layouts()
     num_layouts = len(configured_layouts)
+    variants = get_configured_variants(num_layouts)
 
     if num_layouts < 2:
         # Nothing to switch between if there is only 1 layout
@@ -234,22 +234,24 @@ def main():
         # hotkey (what XKB group toggling does), but through our switcher so
         # fcitx5 input methods stay in sync.
         devices = get_hyprland_devices()
-        current_idx, _ = get_active_keyboard_info(devices, num_layouts)
-        apply_layout_to_typed(devices, (current_idx + 1) % num_layouts, configured_layouts)
+        current_idx = get_active_layout_index(devices, num_layouts)
+        apply_layout_to_typed(
+            devices, (current_idx + 1) % num_layouts, configured_layouts, variants
+        )
         return
 
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(LOCK_FILE, "w") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            toggle(configured_layouts, num_layouts, settings)
+            toggle(configured_layouts, variants, num_layouts, settings)
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-def toggle(configured_layouts, num_layouts, settings):
+def toggle(configured_layouts, variants, num_layouts, settings):
     devices = get_hyprland_devices()
-    current_idx, _ = get_active_keyboard_info(devices, num_layouts)
+    current_idx = get_active_layout_index(devices, num_layouts)
     now_ms = int(time.time() * 1000)
 
     # Default state: [current, previous]
@@ -305,7 +307,7 @@ def toggle(configured_layouts, num_layouts, settings):
     })
 
     # Switch typing keyboards
-    apply_layout_to_typed(devices, target, configured_layouts)
+    apply_layout_to_typed(devices, target, configured_layouts, variants)
 
     # Show macOS switcher HUD only when cycling through layouts (3+ layouts), never on normal toggle
     if num_layouts > 2 and is_cycling:

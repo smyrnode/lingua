@@ -160,6 +160,14 @@ if SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" hotkey "CTRL + SHIFT" >/dev/n
 cp "$BINDINGS" "$WORK/bindings.once"
 SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" hotkey "SUPER + SHIFT + S" >/dev/null || fail "repeat hotkey should succeed"
 cmp -s "$WORK/bindings.once" "$BINDINGS" || fail "hotkey rewrite must be idempotent"
+chmod 0644 "$BINDINGS"
+SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" hotkey "CTRL + SPACE" >/dev/null || fail "hotkey should succeed"
+[[ $(stat -c %a "$BINDINGS") == 644 ]] || fail "hotkey rewrite must keep the bindings file mode"
+mv "$BINDINGS" "$WORK/bindings.real"
+ln -s "$WORK/bindings.real" "$BINDINGS"
+SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" hotkey "SUPER + SHIFT + S" >/dev/null || fail "hotkey should succeed through a symlink"
+[[ -L $BINDINGS ]] || fail "hotkey rewrite must not replace a symlinked bindings file"
+grep -q 'SUPER + SHIFT + S' "$WORK/bindings.real" || fail "symlink target should hold the new combo"
 pass "hotkey rewrites binding"
 
 # 15. switching syncs the fcitx5 input method so typing follows

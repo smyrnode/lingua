@@ -99,16 +99,20 @@ read_bound_hotkey() {
 }
 
 write_binding() {
-  local combo=$1 temp
+  local combo=$1 target temp
   [[ -f $bindings_file ]] || die "Bindings file $bindings_file not found; nothing was changed."
-  temp=$(mktemp --tmpdir="$(dirname "$bindings_file")" .smyrnode-kb-bind.XXXXXX)
-  sed '/omarchy-lang-toggle/d; /macOS-style language toggle/d' "$bindings_file" >"$temp"
+  # Write through symlinks (dotfile managers) and keep the file's mode:
+  # mktemp creates 0600 files.
+  target=$(readlink -f -- "$bindings_file")
+  temp=$(mktemp --tmpdir="$(dirname "$target")" .smyrnode-kb-bind.XXXXXX)
+  sed '/omarchy-lang-toggle/d; /macOS-style language toggle/d' "$target" >"$temp"
   while [[ -s $temp && -z $(tail -n1 "$temp") ]]; do
     sed -i '$d' "$temp"
   done
   printf '\n-- macOS-style language toggle: quick tap toggles last 2, rapid taps cycle all\n' >>"$temp"
   printf 'o.bind("%s", "Toggle language (macOS-style)", "~/.local/bin/omarchy-lang-toggle")\n' "$combo" >>"$temp"
-  mv -f -- "$temp" "$bindings_file"
+  chmod --reference="$target" -- "$temp"
+  mv -f -- "$temp" "$target"
 }
 
 hypr_option_string() {
@@ -206,11 +210,13 @@ render_toggle() {
   chmod 0644 "$target"
 }
 
+# Keep in sync with UNTYPED_KEYBOARDS in KeyboardLayoutModel.js and
+# bin/omarchy-lang-toggle.
+untyped_keyboards_re='(consumer|system)-control|avrcp|fcitx|hl-virtual-keyboard|power-button|sleep-button|lid-switch|video-bus'
+
 typed_keyboard_names() {
-  hyprctl -j devices 2>/dev/null | jq -r '
-    .keyboards[]?.name
-    | select(ascii_downcase
-        | test("consumer|system|virtual|fcitx|power-button|sleep-button|lid-switch|video-bus|avrcp") | not)
+  hyprctl -j devices 2>/dev/null | jq -r --arg re "$untyped_keyboards_re" '
+    .keyboards[]?.name | select(ascii_downcase | test($re) | not)
   '
 }
 
@@ -220,10 +226,9 @@ all_keyboard_names() {
 
 active_index() {
   local index
-  index=$(hyprctl -j devices 2>/dev/null | jq -r '
+  index=$(hyprctl -j devices 2>/dev/null | jq -r --arg re "$untyped_keyboards_re" '
     [.keyboards[]?
-      | select((.name | ascii_downcase
-          | test("consumer|system|virtual|fcitx|power-button|sleep-button|lid-switch|video-bus|avrcp")) | not)
+      | select((.name | ascii_downcase | test($re)) | not)
       | (.active_layout_index // 0)]
     | max // 0
   ' 2>/dev/null || true)
@@ -239,7 +244,9 @@ switch_all() {
   # fcitx5 keyboard-* input methods map keysyms themselves (its virtual
   # keyboard is often the seat's main keyboard), so typing ignores XKB group
   # switches. Sync its input method or the indicator moves but typing does not.
-  code=$(jq -r --argjson i "$index" '.layouts[$i].layout // empty' "$state_file" 2>/dev/null || true)
+  code=$(jq -r --argjson i "$index" '
+    .layouts[$i] // empty | .layout + (if .variant != "" then "-" + .variant else "" end)
+  ' "$state_file" 2>/dev/null || true)
   [[ -n $code ]] && sync_fcitx "$code"
   return 0
 }

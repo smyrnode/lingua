@@ -15,8 +15,8 @@ omarchy plugin enable omarchy.keyboard-layout --section center --after omarchy.c
 
 # 2. Remove keybinding from bindings.lua
 if [[ -f "$BINDINGS_FILE" ]]; then
-  sed -i '/omarchy-lang-toggle/d' "$BINDINGS_FILE"
-  sed -i '/macOS-style language toggle/d' "$BINDINGS_FILE"
+  sed -i --follow-symlinks '/omarchy-lang-toggle/d' "$BINDINGS_FILE"
+  sed -i --follow-symlinks '/macOS-style language toggle/d' "$BINDINGS_FILE"
 fi
 
 # 3. Remove symlink, generated configs, and state

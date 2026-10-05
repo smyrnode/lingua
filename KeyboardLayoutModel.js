@@ -2,7 +2,7 @@
 // dependencies. Catalog parsing and placement adapted from
 // NOmarkOO/omarchy-keyboard-languages (MIT).
 
-var UNTYPED_KEYBOARDS = /(consumer|system|avrcp|fcitx|hl-virtual-keyboard|power-button|sleep-button|lid-switch|video-bus)/
+var UNTYPED_KEYBOARDS = /((consumer|system)-control|avrcp|fcitx|hl-virtual-keyboard|power-button|sleep-button|lid-switch|video-bus)/
 
 var HERO_PHRASES = [
   "Switching scripts",
