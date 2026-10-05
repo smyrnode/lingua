@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-macOS-style keyboard layout switcher for Omarchy / Hyprland.
+Lingua: input language switcher for Omarchy / Hyprland.
 - Normal press (single tap): toggles between the last TWO used layouts.
-- Rapid presses (within CYCLE_TIMEOUT_MS): cycles through all available layouts.
+- Rapid presses with the hotkey modifier held (within CYCLE_TIMEOUT_MS): cycles
+  through all available layouts. Letting go of the modifier between presses
+  makes the next press a plain tap again.
 - Works dynamically with ANY layouts configured in Hyprland (zero hardcoding).
 """
 
@@ -13,13 +15,34 @@ import re
 import subprocess
 import time
 
-STATE_FILE = os.path.expanduser("~/.local/state/omarchy-lang-toggle.json")
-LEGACY_STATE_FILE = os.path.expanduser("~/.cache/omarchy-lang-toggle.json")
+STATE_FILE = os.path.expanduser("~/.local/state/lingua-switch.json")
 LOCK_FILE = STATE_FILE + ".lock"
 SETTINGS_FILE = os.path.expanduser(
-    "~/.local/state/omarchy/settings/smyrnode-macos-keyboard-toggle.json"
+    "~/.local/state/omarchy/settings/smyrnode-lingua.json"
 )
 CYCLE_TIMEOUT_MS = 1000  # 1 second window to continue cycling
+
+# Written by the modifier-press bindings (see write_binding in
+# lingua-layout): ms timestamp of the last press of a hotkey modifier.
+MODIFIER_FILE = os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "lingua-switch.mod"
+)
+START_MS = int(time.time() * 1000)
+
+
+def modifier_repressed_since(ts_ms):
+    """True if a hotkey modifier was pressed again after `ts_ms`.
+
+    Cycling through all languages needs the modifier held between presses,
+    like macOS. Releasing every key between two quick taps starts a new tap
+    (toggle the last two). Without the modifier bindings the file never
+    exists and only the time window applies.
+    """
+    try:
+        with open(MODIFIER_FILE) as f:
+            return int(f.read().strip()) > ts_ms
+    except (OSError, ValueError):
+        return False
 
 
 def load_settings():
@@ -31,7 +54,7 @@ def load_settings():
 
 
 def mru_enabled():
-    """True when the macOS-style switcher owns the hotkey (vs plain XKB)."""
+    """True when the recent-language switcher owns the hotkey (vs plain XKB)."""
     return load_settings().get("switchMode", "mru") == "mru"
 
 
@@ -78,7 +101,7 @@ def get_hyprland_devices():
 
 
 # Keep in sync with UNTYPED_KEYBOARDS in KeyboardLayoutModel.js and
-# untyped_keyboards_re in bin/macos-keyboard-layout.
+# untyped_keyboards_re in bin/lingua-layout.
 UNTYPED_KEYBOARDS = re.compile(
     r"(consumer|system)-control|avrcp|fcitx|hl-virtual-keyboard|power-button|sleep-button|lid-switch|video-bus"
 )
@@ -178,7 +201,7 @@ def hud_names(configured_layouts, layouts_meta):
 
 
 def show_switcher_hud(target_idx, configured_layouts, names):
-    """Show macOS-style card switcher HUD via Omarchy Shell IPC."""
+    """Show card switcher HUD via Omarchy Shell IPC."""
     payload = json.dumps({
         "activeIndex": target_idx,
         "layouts": [c.upper() for c in configured_layouts],
@@ -187,7 +210,7 @@ def show_switcher_hud(target_idx, configured_layouts, names):
 
     try:
         subprocess.Popen(
-            ["omarchy-shell", "-q", "smyrnode.macos-keyboard-toggle", "showHud", payload],
+            ["omarchy-shell", "-q", "smyrnode.lingua", "showHud", payload],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -196,14 +219,11 @@ def show_switcher_hud(target_idx, configured_layouts, names):
 
 
 def load_state():
-    for path in (STATE_FILE, LEGACY_STATE_FILE):
-        if os.path.exists(path):
-            try:
-                with open(path, "r") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-    return None
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def save_state(state):
@@ -212,11 +232,6 @@ def save_state(state):
     with open(tmp, "w") as f:
         json.dump(state, f)
     os.replace(tmp, STATE_FILE)
-    if os.path.exists(LEGACY_STATE_FILE):
-        try:
-            os.remove(LEGACY_STATE_FILE)
-        except OSError:
-            pass
 
 
 def main():
@@ -230,7 +245,7 @@ def main():
         return
 
     if settings.get("switchMode", "mru") != "mru":
-        # macOS-style switching is off: plain sequential cycling on the same
+        # Smart switching is off: plain sequential cycling on the same
         # hotkey (what XKB group toggling does), but through our switcher so
         # fcitx5 input methods stay in sync.
         devices = get_hyprland_devices()
@@ -252,7 +267,7 @@ def main():
 def toggle(configured_layouts, variants, num_layouts, settings):
     devices = get_hyprland_devices()
     current_idx = get_active_layout_index(devices, num_layouts)
-    now_ms = int(time.time() * 1000)
+    now_ms = START_MS
 
     # Default state: [current, previous]
     default_prev = 1 if current_idx == 0 else 0
@@ -279,7 +294,7 @@ def toggle(configured_layouts, variants, num_layouts, settings):
     elapsed = now_ms - last_ts
     is_cycling = False
 
-    if elapsed > CYCLE_TIMEOUT_MS:
+    if elapsed > CYCLE_TIMEOUT_MS or modifier_repressed_since(last_ts):
         # NORMAL TAP: Swap current and previous (MRU toggle)
         origin = mru[0]
         mru = [mru[1], mru[0]]
@@ -309,7 +324,7 @@ def toggle(configured_layouts, variants, num_layouts, settings):
     # Switch typing keyboards
     apply_layout_to_typed(devices, target, configured_layouts, variants)
 
-    # Show macOS switcher HUD only when cycling through layouts (3+ layouts), never on normal toggle
+    # Show switcher HUD only when cycling through layouts (3+ layouts), never on normal toggle
     if num_layouts > 2 and is_cycling:
         meta = settings.get("layouts")
         meta = meta if isinstance(meta, list) else []

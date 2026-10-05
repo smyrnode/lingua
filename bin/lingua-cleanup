@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Undo everything Lingua wires up outside its own folder.
+#
+# `omarchy plugin remove|disable` never runs plugin code or hooks; it only
+# deletes the folder and/or takes the widget out of the bar. The bar widget
+# therefore starts this script, detached, from Component.onDestruction, which
+# also fires on a shell restart or a QML hot-reload. Unless --now is given the
+# script waits for a restart to come back and does nothing when the plugin is
+# still installed and enabled.
+#
+# Usage: lingua-cleanup [--now] [--purge]
+#   --now    skip the wait and the "still installed" check
+#   --purge  also delete the saved language settings (aliases, hotkey, order)
+#
+# Removed:  hotkey binding block in ~/.config/hypr/bindings.lua, the
+#           ~/.local/bin/lingua-switch link, the generated keymap toggle (so
+#           ~/.config/hypr/input.lua is authoritative again), MRU/runtime state.
+# Kept:     ~/.local/state/omarchy/settings/smyrnode-lingua.json, unless
+#           --purge, so a reinstall brings the same languages back.
+#
+# This file is copied to $XDG_RUNTIME_DIR by the widget on every start because
+# the plugin folder may already be gone when it runs, so it must not depend on
+# anything beside itself.
+
+set -uo pipefail
+
+PLUGIN_ID=smyrnode.lingua
+
+now=0
+purge=0
+for arg in "$@"; do
+  case $arg in
+    --now) now=1 ;;
+    --purge) purge=1 ;;
+    *) echo "Usage: lingua-cleanup [--now] [--purge]" >&2; exit 2 ;;
+  esac
+done
+
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}
+runtime_dir=${XDG_RUNTIME_DIR:-/tmp}
+plugin_dir=${LINGUA_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/$PLUGIN_ID}
+shell_json=${LINGUA_SHELL_JSON:-$HOME/.config/omarchy/shell.json}
+bindings_file=${SMYRNODE_KB_BINDINGS_FILE:-$HOME/.config/hypr/bindings.lua}
+settings_dir=$state_root/omarchy/settings
+toggle_dir=$state_root/omarchy/toggles/hypr
+
+# One cleanup at a time: a hot-reload storm starts several of these.
+exec 9>"$runtime_dir/lingua-cleanup.lock"
+flock -x 9
+
+still_installed() {
+  [[ -f $plugin_dir/manifest.json ]] || return 1
+  jq -e --arg id "$PLUGIN_ID" '[.. | objects | select(.id? == $id)] | length > 0' \
+    "$shell_json" >/dev/null 2>&1
+}
+
+if ((!now)); then
+  sleep "${LINGUA_WAIT:-8}"
+  still_installed && exit 0
+fi
+
+# Hyprland keeps a keyboard on a layout index that the reloaded keymap may no
+# longer have; park every keyboard on the first layout before it changes.
+if command -v hyprctl >/dev/null 2>&1; then
+  hyprctl -j devices 2>/dev/null | jq -r '.keyboards[]?.name' 2>/dev/null |
+    while IFS= read -r keyboard; do
+      [[ -z $keyboard ]] || hyprctl switchxkblayout "$keyboard" 0 >/dev/null 2>&1
+    done
+fi
+
+# Hotkey binding block. Follow symlinks and keep the file mode.
+if [[ -f $bindings_file ]]; then
+  sed -i --follow-symlinks \
+    -e '/lingua-switch/d' -e '/Lingua language switch/d' \
+    -e '/omarchy-lang-toggle/d' -e '/macOS-style language toggle/d' \
+    "$bindings_file"
+  # Drop the blank lines the block leaves at the end of the file.
+  while [[ -s $bindings_file && -z $(tail -n1 "$bindings_file") ]]; do
+    sed -i --follow-symlinks '$d' "$bindings_file"
+  done
+fi
+
+[[ ! -L $HOME/.local/bin/lingua-switch ]] || rm -f "$HOME/.local/bin/lingua-switch"
+
+rm -f "$toggle_dir/smyrnode-lingua.lua" \
+  "$state_root/lingua-switch.json" "$state_root/lingua-switch.json.lock" "$state_root/lingua-switch.json.tmp" \
+  "$runtime_dir/lingua-switch.mod" "$settings_dir/smyrnode-lingua.lock"
+rm -f "$settings_dir"/.smyrnode-kb-* "$toggle_dir"/.smyrnode-kb-*
+
+if ((purge)); then
+  rm -f "$settings_dir/smyrnode-lingua.json"
+fi
+
+# Reload so the removed toggle and binding stop applying.
+hyprctl reload >/dev/null 2>&1 || true

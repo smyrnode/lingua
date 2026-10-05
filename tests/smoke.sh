@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Smoke tests for bin/macos-keyboard-layout against a stubbed hyprctl.
+# Smoke tests for bin/lingua-layout against a stubbed hyprctl.
 # The real xkbcli catalog is used for validation.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-HELPER="$PWD/bin/macos-keyboard-layout"
+HELPER="$PWD/bin/lingua-layout"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/bin"
 export XDG_STATE_HOME="$WORK/state"
-STATE="$WORK/state/omarchy/settings/smyrnode-macos-keyboard-toggle.json"
-TOGGLE="$WORK/state/omarchy/toggles/hypr/smyrnode-macos-keyboard-toggle.lua"
+STATE="$WORK/state/omarchy/settings/smyrnode-lingua.json"
+TOGGLE="$WORK/state/omarchy/toggles/hypr/smyrnode-lingua.lua"
 export PATH="$WORK/bin:$PATH"
 export STUB_LOG="$WORK/hyprctl.log"
 
@@ -145,11 +145,11 @@ pass "reapply forces apply"
 # 14. hotkey rewrites the binding and records the combo
 BINDINGS="$WORK/bindings.lua"
 printf '%s\n' '-- keep me' 'o.bind("SUPER + E", "Editor", "nvim")' >"$BINDINGS"
-printf '\n-- macOS-style language toggle\n' >>"$BINDINGS"
-printf 'o.bind("CTRL + SPACE", "Toggle language (macOS-style)", "~/.local/bin/omarchy-lang-toggle")\n' >>"$BINDINGS"
+printf '\n-- Lingua language switch\n' >>"$BINDINGS"
+printf 'o.bind("CTRL + SPACE", "Switch language", "~/.local/bin/lingua-switch")\n' >>"$BINDINGS"
 out=$(SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" hotkey "super + shift + s") || fail "hotkey should succeed"
 jq -e '.hotkey == "SUPER + SHIFT + S"' <<<"$out" >/dev/null || fail "hotkey should be normalized and stored"
-grep -q 'o.bind("SUPER + SHIFT + S", "Toggle language (macOS-style)"' "$BINDINGS" || fail "binding should use the new combo"
+grep -q 'o.bind("SUPER + SHIFT + S", "Switch language"' "$BINDINGS" || fail "binding should use the new combo"
 if grep -q 'CTRL + SPACE' "$BINDINGS"; then fail "old combo should be gone"; fi
 grep -q 'SUPER + E' "$BINDINGS" || fail "foreign bindings must survive"
 out=$(SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" status)
@@ -168,6 +168,23 @@ ln -s "$WORK/bindings.real" "$BINDINGS"
 SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" hotkey "SUPER + SHIFT + S" >/dev/null || fail "hotkey should succeed through a symlink"
 [[ -L $BINDINGS ]] || fail "hotkey rewrite must not replace a symlinked bindings file"
 grep -q 'SUPER + SHIFT + S' "$WORK/bindings.real" || fail "symlink target should hold the new combo"
+# the switcher needs a press record for every modifier of the combo, both sides
+[[ $(grep -c 'lingua-switch\.mod' "$WORK/bindings.real") == 4 ]] || fail "SUPER + SHIFT should get four modifier-press bindings"
+for keysym in Super_L Super_R Shift_L Shift_R; do
+  grep -q "o.bind(\"$keysym\", nil, .*non_consuming = true, ignore_mods = true" "$WORK/bindings.real" || fail "missing modifier-press binding for $keysym"
+done
+SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" hotkey "CTRL + SPACE" >/dev/null || fail "hotkey should succeed"
+[[ $(grep -c 'lingua-switch\.mod' "$WORK/bindings.real") == 2 ]] || fail "CTRL should get two modifier-press bindings"
+grep -q 'o.bind("Control_L"' "$WORK/bindings.real" && grep -q 'o.bind("Control_R"' "$WORK/bindings.real" || fail "missing Control press bindings"
+if grep -q -E 'Super_|Shift_' "$WORK/bindings.real"; then fail "old combo's modifier bindings should be gone"; fi
+# `bind` keeps the saved hotkey, restores the block, and is idempotent
+sed -i '/lingua-switch\.mod/d' "$WORK/bindings.real"
+SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" bind || fail "bind should succeed"
+[[ $(grep -c 'lingua-switch\.mod' "$WORK/bindings.real") == 2 ]] || fail "bind should restore the modifier-press bindings"
+grep -q 'o.bind("CTRL + SPACE", "Switch language"' "$WORK/bindings.real" || fail "bind should keep the bound hotkey"
+cp "$WORK/bindings.real" "$WORK/bindings.bound"
+SMYRNODE_KB_BINDINGS_FILE="$BINDINGS" "$HELPER" bind || fail "repeat bind should succeed"
+cmp -s "$WORK/bindings.bound" "$WORK/bindings.real" || fail "bind must be idempotent"
 pass "hotkey rewrites binding"
 
 # 15. switching syncs the fcitx5 input method so typing follows
@@ -175,5 +192,55 @@ pass "hotkey rewrites binding"
 "$HELPER" set 1 >/dev/null || fail "set should succeed"
 grep -q 'fcitx -s keyboard-ru' "$STUB_LOG" || fail "switching must sync the fcitx5 input method"
 pass "fcitx5 input method synced"
+
+# 16. an install made under the old plugin name is carried over
+(
+  export HOME="$WORK/home" XDG_STATE_HOME="$WORK/home/.local/state" XDG_RUNTIME_DIR="$WORK/run"
+  OMARCHY_STATE="$XDG_STATE_HOME/omarchy"
+  mkdir -p "$HOME/.local/bin" "$HOME/.cache" "$XDG_RUNTIME_DIR" \
+    "$OMARCHY_STATE/settings" "$OMARCHY_STATE/toggles/hypr"
+  echo '{"keep":"me"}' >"$OMARCHY_STATE/settings/smyrnode-macos-keyboard-toggle.json"
+  : >"$OMARCHY_STATE/settings/smyrnode-macos-keyboard-toggle.lock"
+  echo '-- old toggle' >"$OMARCHY_STATE/toggles/hypr/smyrnode-macos-keyboard-toggle.lua"
+  echo '{"mru":[1,0]}' >"$XDG_STATE_HOME/omarchy-lang-toggle.json"
+  echo '{}' >"$HOME/.cache/omarchy-lang-toggle.json"
+  ln -s /bin/true "$HOME/.local/bin/omarchy-lang-toggle"
+  : >"$XDG_RUNTIME_DIR/omarchy-lang-toggle.mod"
+  LEGACY_BINDINGS="$WORK/legacy-bindings.lua"
+  printf '%s\n' '-- keep me' '' '-- macOS-style language toggle: x' \
+    'o.bind("SUPER + SHIFT + S", "Toggle language (macOS-style)", "~/.local/bin/omarchy-lang-toggle")' >"$LEGACY_BINDINGS"
+
+  SMYRNODE_KB_BINDINGS_FILE="$LEGACY_BINDINGS" "$HELPER" migrate || fail "migrate should succeed"
+
+  grep -q '"keep":"me"' "$OMARCHY_STATE/settings/smyrnode-lingua.json" || fail "settings should move to the new name"
+  grep -q 'old toggle' "$OMARCHY_STATE/toggles/hypr/smyrnode-lingua.lua" || fail "generated toggle should move to the new name"
+  grep -q '"mru":\[1,0\]' "$XDG_STATE_HOME/lingua-switch.json" || fail "MRU state should move to the new name"
+  [[ ! -e $HOME/.local/bin/omarchy-lang-toggle && ! -e $HOME/.cache/omarchy-lang-toggle.json ]] || fail "old link and cache should be gone"
+  [[ ! -e $XDG_RUNTIME_DIR/omarchy-lang-toggle.mod && ! -e $OMARCHY_STATE/settings/smyrnode-macos-keyboard-toggle.lock ]] || fail "old runtime files should be gone"
+  grep -q 'keep me' "$LEGACY_BINDINGS" || fail "foreign lines must survive the binding rewrite"
+  if grep -q -E 'omarchy-lang-toggle|macOS' "$LEGACY_BINDINGS"; then fail "old binding lines should be gone"; fi
+  grep -q 'o.bind("SUPER + SHIFT + S", "Switch language", "~/.local/bin/lingua-switch")' "$LEGACY_BINDINGS" || fail "binding should keep the hotkey under the new name"
+  [[ $(grep -c 'lingua-switch\.mod' "$LEGACY_BINDINGS") == 4 ]] || fail "modifier-press bindings should be written"
+  cp "$LEGACY_BINDINGS" "$WORK/legacy.once"
+  SMYRNODE_KB_BINDINGS_FILE="$LEGACY_BINDINGS" "$HELPER" migrate || fail "repeat migrate should succeed"
+  cmp -s "$WORK/legacy.once" "$LEGACY_BINDINGS" || fail "migrate must be idempotent"
+)
+pass "legacy install migrated"
+
+# 17. saved languages without the generated keymap (cleanup ran, then reinstall) get it back
+rm -f "$TOGGLE"
+: >"$STUB_LOG"
+"$HELPER" status >/dev/null || fail "status should succeed without the generated toggle"
+[[ -f $TOGGLE ]] || fail "status should regenerate the keymap toggle from the saved languages"
+grep -q "kb_layout" "$STUB_LOG" || { cat "$STUB_LOG"; fail "the regenerated keymap should be applied live"; }
+pass "keymap restored on reinstall"
+
+# 18. a missing dependency is reported with the package to install
+mkdir -p "$WORK/nopython"
+for tool in bash jq xkbcli flock; do ln -sf "$(command -v "$tool")" "$WORK/nopython/$tool"; done
+ln -sf "$WORK/bin/hyprctl" "$WORK/nopython/hyprctl"
+if message=$(PATH="$WORK/nopython" "$HELPER" status 2>&1 >/dev/null); then fail "status must fail without python3"; fi
+grep -q 'Lingua needs python3. Install with: omarchy pkg add python' <<<"$message" || fail "missing python3 should name the package: $message"
+pass "missing dependency reported"
 
 echo "ALL TESTS PASSED"

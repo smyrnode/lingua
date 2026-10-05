@@ -7,12 +7,12 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// macOS-style keyboard layout indicator with a management panel.
+// Language indicator with a management panel.
 // Left-click switches (MRU engine), right-click opens the panel.
 Panel {
   id: root
 
-  moduleName: "smyrnode.macos-keyboard-toggle"
+  moduleName: "smyrnode.lingua"
   manageIpc: false
 
   // --- widget state --------------------------------------------------------
@@ -78,9 +78,14 @@ Panel {
     return item ? Model.descriptionFor(catalog, item.layout, item.variant) : layoutFull
   }
   readonly property string helperCommand: {
-    var resolved = String(Qt.resolvedUrl("bin/macos-keyboard-layout"))
+    var resolved = String(Qt.resolvedUrl("bin/lingua-layout"))
     return decodeURIComponent(resolved.replace(/^file:\/\//, ""))
   }
+  readonly property string cleanupScript: {
+    var resolved = String(Qt.resolvedUrl("bin/lingua-cleanup"))
+    return decodeURIComponent(resolved.replace(/^file:\/\//, ""))
+  }
+  readonly property string cleanupCopy: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/lingua-cleanup"
   readonly property int pickerControlHeight: Math.max(Style.spacing.controlHeight, Style.font.body + Style.spacing.inputPaddingY * 2 + Style.space(6))
   readonly property int pickerPopupRowHeight: Math.max(Style.spacing.popupRowHeight, pickerControlHeight + Style.space(4))
   readonly property var heroPhrases: Model.heroPhrases()
@@ -96,7 +101,7 @@ Panel {
 
   function toggleLayout() {
     if (!root.bar) return
-    var scriptPath = String(Qt.resolvedUrl("bin/omarchy-lang-toggle")).replace(/^file:\/\//, "")
+    var scriptPath = String(Qt.resolvedUrl("bin/lingua-switch")).replace(/^file:\/\//, "")
     root.bar.run(scriptPath)
     refreshTimer.restart()
   }
@@ -319,7 +324,7 @@ Panel {
   }
 
   function toggleSwitchMode() {
-    runAction(["mode", switchMode === "mru" ? "xkb" : "mru"], switchMode === "mru" ? "Sequential cycling enabled." : "macOS-style switching enabled.")
+    runAction(["mode", switchMode === "mru" ? "xkb" : "mru"], switchMode === "mru" ? "Sequential cycling enabled." : "Smart switching enabled.")
   }
 
   function activateCursor() {
@@ -338,6 +343,14 @@ Panel {
     catalogProc.running = true
     refreshState()
     refresh()
+  }
+
+  // Fires on disable, remove, shell restart and hot-reload alike. The cleanup
+  // script waits and does nothing when the plugin comes back (see its header).
+  Component.onDestruction: {
+    Quickshell.execDetached(["bash", "-c",
+      "if [ -x \"$1\" ]; then exec \"$1\"; else exec \"$2\"; fi",
+      "sh", root.cleanupCopy, root.cleanupScript])
   }
 
   onOpenedChanged: {
@@ -367,20 +380,27 @@ Panel {
     }
   }
 
-  // First-run setup: link the toggle script and register the hotkey once.
+  // Setup on every start (omarchy plugin add never runs install hooks): link
+  // the switcher, register the hotkey on a fresh install, migrate older
+  // bindings, and park a copy of the cleanup script outside the plugin folder
+  // so it still exists after the folder is removed.
   Process {
     id: setupProc
     command: [
       "sh", "-c",
+      "link=~/.local/bin/lingua-switch; bindings=~/.config/hypr/bindings.lua; " +
+      "cp -f \"$3\" \"${XDG_RUNTIME_DIR:-/tmp}/lingua-cleanup\" && chmod +x \"${XDG_RUNTIME_DIR:-/tmp}/lingua-cleanup\"; " +
       "mkdir -p ~/.local/bin && " +
-      "SCRIPT=" + String(Qt.resolvedUrl("bin/omarchy-lang-toggle")).replace(/^file:\/\//, "") + " && " +
-      "NEW_SETUP=1 && " +
-      "{ [ -e ~/.local/bin/omarchy-lang-toggle ] || [ -L ~/.local/bin/omarchy-lang-toggle ]; } && NEW_SETUP=; " +
-      "grep -q 'omarchy-lang-toggle' ~/.config/hypr/bindings.lua 2>/dev/null && NEW_SETUP=; " +
-      "ln -sf \"$SCRIPT\" ~/.local/bin/omarchy-lang-toggle && " +
-      "if [ -n \"$NEW_SETUP\" ] && [ -f ~/.config/hypr/bindings.lua ]; then " +
-      "printf '\\n-- macOS-style language toggle\\no.bind(\"CTRL + SPACE\", \"Toggle language (macOS-style)\", \"~/.local/bin/omarchy-lang-toggle\")\\n' >> ~/.config/hypr/bindings.lua && " +
-      "hyprctl reload; fi"
+      "fresh=1; { [ -e \"$link\" ] || [ -L \"$link\" ]; } && fresh=; " +
+      "ln -sf \"$1\" \"$link\"; \"$2\" migrate; [ -f \"$bindings\" ] || exit 0; " +
+      "if grep -q 'lingua-switch' \"$bindings\"; then " +
+      "grep -q 'lingua-switch\\.mod' \"$bindings\" && exit 0; " +
+      "elif [ -z \"$fresh\" ]; then exit 0; fi; " +
+      "\"$2\" bind && hyprctl reload",
+      "sh",
+      String(Qt.resolvedUrl("bin/lingua-switch")).replace(/^file:\/\//, ""),
+      root.helperCommand,
+      root.cleanupScript
     ]
   }
 
@@ -502,7 +522,7 @@ Panel {
   }
 
   IpcHandler {
-    target: "smyrnode.macos-keyboard-toggle"
+    target: "smyrnode.lingua"
     function ping(): string {
       return "pong"
     }
@@ -536,7 +556,7 @@ Panel {
   }
 
   IpcHandler {
-    target: "smyrnode.macos-keyboard-toggle.demo"
+    target: "smyrnode.lingua.demo"
     function showMain(): void {
       root.open()
       Qt.callLater(root.openMain)
@@ -672,7 +692,7 @@ Panel {
             fontFamily: Style.font.family
             title: root.view === "main" ? root.activeDescription : (root.view === "alias" ? "Edit bar alias" : (root.view === "hotkey" ? "Switching hotkey" : "Add a language"))
             meta: root.view === "main" ? root.heroPhrase : (root.view === "alias" && root.editingAliasLayout ? Model.descriptionFor(root.catalog, root.editingAliasLayout.layout, root.editingAliasLayout.variant) : (root.view === "hotkey" ? "Key combination to capture" : "Installed XKB layouts"))
-            detail: root.view === "main" ? root.layoutLabel : (root.view === "alias" ? root.aliasPreview : (root.view === "hotkey" ? Model.normalizeHotkey(root.pendingHotkey) || root.switchHotkey : ""))
+            detail: root.view === "main" ? root.layoutLabel : (root.view === "alias" ? root.aliasPreview : "")
 
             iconComponent: Component {
               Text {
@@ -742,6 +762,7 @@ Panel {
                 accent: Color.accent
 
                 HoverHandler {
+                  cursorShape: root.stateReady ? Qt.PointingHandCursor : Qt.ArrowCursor
                   onHoveredChanged: {
                     if (hovered) root.cursorIndex = index
                   }
@@ -865,50 +886,6 @@ Panel {
               }
             }
 
-            Item {
-              width: 1
-              height: Style.space(4)
-            }
-
-            PanelSeparator {
-              width: parent.width
-              foreground: Color.foreground
-            }
-
-            Toggle {
-              width: parent.width
-              label: "macOS-style switching"
-              description: root.switchMode === "mru" ? "Quick tap toggles between the two most recent languages. Rapid taps cycle all." : "Every press cycles through all languages."
-              checked: root.switchMode === "mru"
-              enabled: root.stateReady && !applyProc.running
-              foreground: Color.foreground
-              accent: Color.accent
-              fontFamily: Style.font.family
-              onClicked: root.toggleSwitchMode()
-            }
-
-            Button {
-              width: parent.width
-              text: "Switching hotkey"
-              iconText: "󰌒"
-              leftAlign: true
-              focusable: true
-              enabled: root.stateReady && !applyProc.running
-              foreground: Color.foreground
-              fontFamily: Style.font.family
-              onClicked: root.startHotkey()
-            }
-
-            Text {
-              width: parent.width
-              leftPadding: Style.spacing.controlPaddingX
-              text: root.switchHotkey
-              color: Qt.darker(Color.foreground, 1.45)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-            }
-
             Button {
               width: parent.width
               text: "Add language"
@@ -923,6 +900,102 @@ Panel {
                 if (hovered) root.cursorIndex = root.configuredLayouts.length
               }
               onClicked: root.startAdd()
+            }
+
+            Item {
+              width: 1
+              height: Style.space(4)
+            }
+
+            PanelSeparator {
+              width: parent.width
+              foreground: Color.foreground
+            }
+
+            CursorSurface {
+              id: modeRow
+
+              readonly property bool active: root.stateReady && !applyProc.running
+
+              width: parent.width
+              implicitHeight: modeContent.implicitHeight + Style.spacing.md * 2
+              hasCursor: modeHover.hovered && active
+              opacity: active ? 1 : 0.5
+              foreground: Color.foreground
+              accent: Color.accent
+
+              HoverHandler {
+                id: modeHover
+                cursorShape: modeRow.active ? Qt.PointingHandCursor : Qt.ArrowCursor
+              }
+
+              TapHandler {
+                enabled: modeRow.active
+                onTapped: root.toggleSwitchMode()
+              }
+
+              Row {
+                id: modeContent
+
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(10)
+                anchors.rightMargin: Style.space(10)
+                spacing: Style.space(12)
+
+                Column {
+                  width: parent.width - modeSwitch.width - parent.spacing
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(1)
+
+                  Text {
+                    width: parent.width
+                    text: "Smart switching"
+                    color: Color.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: root.switchMode === "mru" ? "Quick tap toggles between the two most recent languages. Hold the modifier and tap to cycle all." : "Every press cycles through all languages."
+                    color: Qt.darker(Color.foreground, 1.45)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+                }
+
+                ToggleSwitch {
+                  id: modeSwitch
+
+                  anchors.verticalCenter: parent.verticalCenter
+                  checked: root.switchMode === "mru"
+                  interactive: false
+                  foreground: Color.foreground
+                  accent: Color.accent
+                }
+              }
+            }
+
+            Button {
+              width: parent.width
+              text: "Switching hotkey"
+              iconText: "󰌒"
+              leftAlign: true
+              focusable: true
+              enabled: root.stateReady && !applyProc.running
+              foreground: Color.foreground
+              fontFamily: Style.font.family
+              onClicked: root.startHotkey()
+            }
+
+            KeyCaps {
+              x: Style.spacing.controlPaddingX
+              combo: root.switchHotkey
+              foreground: Color.foreground
             }
           }
 
@@ -1119,13 +1192,22 @@ Panel {
             width: parent.width
             spacing: Style.space(12)
 
-            Text {
-              width: parent.width
-              text: "Press the key combination for switching languages. Currently: " + root.switchHotkey + "."
-              color: Qt.darker(Color.foreground, 1.45)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-              wrapMode: Text.WordWrap
+            Row {
+              spacing: Style.space(10)
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Press a new combination. Current:"
+                color: Qt.darker(Color.foreground, 1.45)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+              }
+
+              KeyCaps {
+                anchors.verticalCenter: parent.verticalCenter
+                combo: root.switchHotkey
+                foreground: Color.foreground
+              }
             }
 
             Item {
@@ -1158,12 +1240,21 @@ Panel {
                 borderSpec: Border.controlSpec("focus", Color.foreground, Color.accent)
 
                 Text {
+                  visible: root.pendingHotkey === ""
                   anchors.centerIn: parent
-                  text: root.pendingHotkey === "" ? "Press a key combination…" : Model.normalizeHotkey(root.pendingHotkey)
-                  color: root.pendingHotkey === "" ? Qt.darker(Color.foreground, 1.5) : Color.foreground
+                  text: "Press a key combination…"
+                  color: Qt.darker(Color.foreground, 1.5)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
                   font.bold: true
+                }
+
+                KeyCaps {
+                  visible: root.pendingHotkey !== ""
+                  anchors.centerIn: parent
+                  combo: Model.normalizeHotkey(root.pendingHotkey)
+                  foreground: Color.foreground
+                  pixelSize: Style.font.body
                 }
               }
             }

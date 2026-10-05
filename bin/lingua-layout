@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keyboard layout manager for the macOS-style keyboard toggle plugin.
+# Layout manager for the Lingua plugin.
 #
 # State JSON is the source of truth; a Lua toggle file is generated for
 # Omarchy's user-toggle loader. Safe-apply flow (validate -> pause
@@ -11,32 +11,54 @@ set -euo pipefail
 
 state_root=${XDG_STATE_HOME:-$HOME/.local/state}
 state_dir=$state_root/omarchy/settings
-state_file=${SMYRNODE_KB_STATE_FILE:-$state_dir/smyrnode-macos-keyboard-toggle.json}
+state_file=${SMYRNODE_KB_STATE_FILE:-$state_dir/smyrnode-lingua.json}
 toggle_dir=$state_root/omarchy/toggles/hypr
-toggle_file=${SMYRNODE_KB_TOGGLE_FILE:-$toggle_dir/smyrnode-macos-keyboard-toggle.lua}
-lock_file=$state_dir/smyrnode-macos-keyboard-toggle.lock
+toggle_file=${SMYRNODE_KB_TOGGLE_FILE:-$toggle_dir/smyrnode-lingua.lua}
+lock_file=$state_dir/smyrnode-lingua.lock
 bindings_file=${SMYRNODE_KB_BINDINGS_FILE:-${HOME}/.config/hypr/bindings.lua}
 
 usage() {
   printf '%s\n' \
-    'Usage: macos-keyboard-layout status' \
-    '       macos-keyboard-layout available' \
-    '       macos-keyboard-layout set INDEX' \
-    '       macos-keyboard-layout add LAYOUT [VARIANT]' \
-    '       macos-keyboard-layout remove INDEX' \
-    '       macos-keyboard-layout move INDEX up|down' \
-    '       macos-keyboard-layout alias INDEX [VALUE]' \
-    '       macos-keyboard-layout hotkey COMBO' \
-    '       macos-keyboard-layout mode mru|xkb' \
-    '       macos-keyboard-layout reapply' \
-    '       macos-keyboard-layout snapshot-current' \
-    '       macos-keyboard-layout current-index' >&2
+    'Usage: lingua-layout status' \
+    '       lingua-layout available' \
+    '       lingua-layout set INDEX' \
+    '       lingua-layout add LAYOUT [VARIANT]' \
+    '       lingua-layout remove INDEX' \
+    '       lingua-layout move INDEX up|down' \
+    '       lingua-layout alias INDEX [VALUE]' \
+    '       lingua-layout hotkey COMBO' \
+    '       lingua-layout bind' \
+    '       lingua-layout migrate' \
+    '       lingua-layout mode mru|xkb' \
+    '       lingua-layout reapply' \
+    '       lingua-layout snapshot-current' \
+    '       lingua-layout current-index' >&2
   exit 2
 }
 
 die() {
   printf '%s\n' "$1" >&2
   exit 1
+}
+
+# Lingua does not install anything: omarchy plugin add only clones the repo.
+# jq, xkbcli (libxkbcommon), hyprctl and flock ship with Omarchy; python3 runs
+# the hotkey switcher and is the one that may be missing.
+require_commands() {
+  local missing=() packages=() cmd
+  for cmd in jq xkbcli hyprctl flock python3; do
+    command -v "$cmd" >/dev/null 2>&1 && continue
+    missing+=("$cmd")
+    case $cmd in
+      xkbcli) packages+=(libxkbcommon) ;;
+      hyprctl) packages+=(hyprland) ;;
+      flock) packages+=(util-linux) ;;
+      python3) packages+=(python) ;;
+      *) packages+=("$cmd") ;;
+    esac
+  done
+  ((${#missing[@]} == 0)) ||
+    die "Lingua needs ${missing[*]}. Install with: omarchy pkg add ${packages[*]}"
 }
 
 ensure_dirs() {
@@ -94,23 +116,47 @@ validate_hotkey() {
   return 0
 }
 
+# Keysyms of the hotkey's modifiers (every token but the last).
+modifier_keysyms() {
+  local -a tokens
+  local token i
+  IFS='+' read -r -a tokens <<<"$1"
+  for ((i = 0; i < ${#tokens[@]} - 1; i++)); do
+    token=${tokens[i]//[[:space:]]/}
+    case $token in
+      SUPER) printf '%s\n' Super_L Super_R ;;
+      CTRL) printf '%s\n' Control_L Control_R ;;
+      ALT) printf '%s\n' Alt_L Alt_R ;;
+      SHIFT) printf '%s\n' Shift_L Shift_R ;;
+    esac
+  done
+}
+
 read_bound_hotkey() {
-  sed -nE 's/^o\.bind\("([^"]+)".*omarchy-lang-toggle.*/\1/p' "$bindings_file" 2>/dev/null | head -n1
+  sed -nE 's/^o\.bind\("([^"]+)".*(lingua-switch|omarchy-lang-toggle)"\).*/\1/p' "$bindings_file" 2>/dev/null | head -n1
 }
 
 write_binding() {
-  local combo=$1 target temp
+  local combo=$1 target temp keysym
   [[ -f $bindings_file ]] || die "Bindings file $bindings_file not found; nothing was changed."
   # Write through symlinks (dotfile managers) and keep the file's mode:
   # mktemp creates 0600 files.
   target=$(readlink -f -- "$bindings_file")
   temp=$(mktemp --tmpdir="$(dirname "$target")" .smyrnode-kb-bind.XXXXXX)
-  sed '/omarchy-lang-toggle/d; /macOS-style language toggle/d' "$target" >"$temp"
+  sed '/lingua-switch/d; /Lingua language switch/d; /omarchy-lang-toggle/d; /macOS-style language toggle/d' "$target" >"$temp"
   while [[ -s $temp && -z $(tail -n1 "$temp") ]]; do
     sed -i '$d' "$temp"
   done
-  printf '\n-- macOS-style language toggle: quick tap toggles last 2, rapid taps cycle all\n' >>"$temp"
-  printf 'o.bind("%s", "Toggle language (macOS-style)", "~/.local/bin/omarchy-lang-toggle")\n' "$combo" >>"$temp"
+  printf '\n-- Lingua language switch: quick tap toggles last 2, holding the modifier and tapping cycles all\n' >>"$temp"
+  printf 'o.bind("%s", "Switch language", "~/.local/bin/lingua-switch")\n' "$combo" >>"$temp"
+  # Cycling needs the modifier held between presses. Record every press of the
+  # hotkey's modifiers (non-consuming, whatever else is held) so the switcher
+  # can tell a held modifier from a re-press. Hyprland cannot report release
+  # of a modifier that was used in a combo, but it does report presses.
+  while IFS= read -r keysym; do
+    printf 'o.bind("%s", nil, %s, { non_consuming = true, ignore_mods = true })\n' \
+      "$keysym" "'date +%s%3N > \"\${XDG_RUNTIME_DIR:-/tmp}/lingua-switch.mod\"'" >>"$temp"
+  done < <(modifier_keysyms "$combo")
   chmod --reference="$target" -- "$temp"
   mv -f -- "$temp" "$target"
 }
@@ -199,7 +245,7 @@ validate_candidate() {
 render_toggle() {
   local payload=$1 target=$2
   printf '%s\n' \
-    '-- Generated by smyrnode.macos-keyboard-toggle. Use the bar panel to edit this file.' \
+    '-- Generated by smyrnode.lingua. Use the bar panel to edit this file.' \
     'hl.config({' \
     '  input = {' \
     "    kb_layout = \"$(layout_csv "$payload")\"," \
@@ -211,7 +257,7 @@ render_toggle() {
 }
 
 # Keep in sync with UNTYPED_KEYBOARDS in KeyboardLayoutModel.js and
-# bin/omarchy-lang-toggle.
+# bin/lingua-switch.
 untyped_keyboards_re='(consumer|system)-control|avrcp|fcitx|hl-virtual-keyboard|power-button|sleep-button|lid-switch|video-bus'
 
 typed_keyboard_names() {
@@ -439,11 +485,51 @@ commit_metadata_candidate() {
 
 ensure_state() {
   ensure_dirs
-  [[ -f $state_file ]] && return 0
+  if [[ -f $state_file ]]; then
+    # Saved languages without their generated keymap toggle (cleanup ran when
+    # the plugin was disabled or removed): bring the keymap back.
+    [[ -f $toggle_file ]] || commit_candidate "$(jq -c . "$state_file")" "$(active_index)" "" "" true >/dev/null
+    return 0
+  fi
   local initial
   initial=$(snapshot_current)
   commit_candidate "$initial" "$(active_index)" >/dev/null
 }
+
+# Carry an install made under the plugin's old name (macos-keyboard-toggle /
+# omarchy-lang-toggle) over to the current file names. Idempotent and cheap:
+# it only touches what still exists under an old name.
+migrate_legacy() {
+  local old_settings=$state_dir/smyrnode-macos-keyboard-toggle
+  local old_toggle=$toggle_dir/smyrnode-macos-keyboard-toggle.lua
+  local old_mru=$state_root/omarchy-lang-toggle.json
+  local new_mru=$state_root/lingua-switch.json
+  local runtime=${XDG_RUNTIME_DIR:-/tmp}
+  local link=$HOME/.local/bin/omarchy-lang-toggle combo
+
+  if [[ -f $old_settings.json ]]; then
+    ensure_dirs
+    if [[ -f $state_file ]]; then rm -f -- "$old_settings.json"; else mv -f -- "$old_settings.json" "$state_file"; fi
+  fi
+  if [[ -f $old_toggle ]]; then
+    ensure_dirs
+    if [[ -f $toggle_file ]]; then rm -f -- "$old_toggle"; else mv -f -- "$old_toggle" "$toggle_file"; fi
+  fi
+  if [[ -f $old_mru ]]; then
+    if [[ -f $new_mru ]]; then rm -f -- "$old_mru"; else mv -f -- "$old_mru" "$new_mru"; fi
+  fi
+  rm -f -- "$old_settings.lock" "$old_mru.lock" "$old_mru.tmp" \
+    "$HOME/.cache/omarchy-lang-toggle.json" "$runtime/omarchy-lang-toggle.mod"
+  [[ ! -L $link ]] || rm -f -- "$link"
+
+  if grep -q -E 'omarchy-lang-toggle|macOS-style language toggle' "$bindings_file" 2>/dev/null; then
+    combo=$(read_bound_hotkey)
+    write_binding "${combo:-CTRL + SPACE}"
+    hyprctl reload >/dev/null 2>&1 || true
+  fi
+}
+
+require_commands
 
 action=${1:-status}
 case "$action" in
@@ -565,6 +651,20 @@ case "$action" in
     commit_metadata_candidate "$payload"
     write_binding "$combo"
     hyprctl reload >/dev/null 2>&1 || true
+    ;;
+  migrate)
+    migrate_legacy
+    ;;
+  bind)
+    # (Re)write the hotkey binding block, keeping the bound or saved hotkey.
+    # Used by install.sh and the widget's first-run setup.
+    ensure_dirs
+    exec 9>"$lock_file"
+    flock -x 9
+    combo=$(read_bound_hotkey)
+    [[ -n $combo ]] || combo=$(jq -r '.hotkey // empty' "$state_file" 2>/dev/null || true)
+    [[ -n $combo ]] || combo='CTRL + SPACE'
+    write_binding "$combo"
     ;;
   mode)
     mode=${2:-}
