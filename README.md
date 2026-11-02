@@ -179,3 +179,7 @@ The tests run against a stubbed `hyprctl` in a temporary `HOME`; they never touc
 ## License
 
 [MIT](LICENSE) © 2026 Dmitry Smyrnov
+
+### Third-party attribution
+
+`KeyboardLayoutModel.js`, `KeyboardSearchableDropdown.qml` and the safe-apply flow in `bin/lingua-layout` are adapted from [NOmarkOO/omarchy-keyboard-languages](https://github.com/NOmarkOO/omarchy-keyboard-languages), © 2026 NOmarkOO, MIT licensed. The upstream copyright and permission notice are reproduced in [LICENSE](LICENSE), which applies to the whole repository.

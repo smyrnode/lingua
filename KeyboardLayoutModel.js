@@ -1,6 +1,8 @@
 // Pure data model for the keyboard layout widget and panel. No Qt
 // dependencies. Catalog parsing and placement adapted from
 // NOmarkOO/omarchy-keyboard-languages (MIT).
+// Portions Copyright (c) 2026 NOmarkOO, MIT License. The copyright and
+// permission notice are reproduced in LICENSE.
 
 var UNTYPED_KEYBOARDS = /((consumer|system)-control|avrcp|fcitx|hl-virtual-keyboard|power-button|sleep-button|lid-switch|video-bus)/
 

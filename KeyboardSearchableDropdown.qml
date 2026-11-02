@@ -9,6 +9,8 @@ import qs.Ui
 // The popup is reparented to the shell window so panel clipping and every bar
 // orientation share one bounded placement path.
 // Adapted from NOmarkOO/omarchy-keyboard-languages (MIT).
+// Portions Copyright (c) 2026 NOmarkOO, MIT License. The copyright and
+// permission notice are reproduced in LICENSE.
 Item {
     id: root
 

@@ -6,6 +6,8 @@
 # autoreload -> atomic writes -> rollback) adapted from
 # NOmarkOO/omarchy-keyboard-languages (MIT):
 # https://github.com/NOmarkOO/omarchy-keyboard-languages
+# Portions Copyright (c) 2026 NOmarkOO, MIT License. The copyright and
+# permission notice are reproduced in LICENSE.
 
 set -euo pipefail
 
